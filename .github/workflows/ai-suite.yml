@@ -1,0 +1,74 @@
+name: 🤖 AI Full Suite (Docs & Tests)
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  ai-process:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.target_branch || github.ref }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install & Setup
+        run: |
+          pip install cerebras_cloud_sdk
+          mkdir -p tests
+          mkdir -p docs
+          touch tests/__init__.py
+
+      - name: Run AI Generator
+        env:
+          CEREBRAS_API_KEY: ${{ secrets.CEREBRAS_API_KEY }}
+        run: |
+          rm -f tests/test_*.py
+          rm -f docs/docs_*.md
+          python .github/scripts/ai_generator.py
+
+      - name: Run Unit Tests
+        continue-on-error: true
+        run: |
+          PYTHONPATH=. python -m unittest discover -s tests -p "test_*.py"
+
+      - name: Create Pull Request
+        id: cpr
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "docs: AI generated documentation and unit tests"
+          branch: ai-updates-${{ github.run_id }}
+          title: "🤖 AI Documentation & Tests Update"
+          body: "Automatic update triggered by push to ${{ github.ref_name }}"
+          base: ${{ github.ref_name }}
+          delete-branch: true
+
+      - name: Notify Discord
+        if: always()
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: "AI Automation Status"
+          description: |
+            The AI process has completed.
+            Status: ${{ job.status }}
+            PR URL: ${{ steps.cpr.outputs.pull-request-url }}
