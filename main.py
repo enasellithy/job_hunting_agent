@@ -20,6 +20,7 @@ from cover_letter_generator import CoverLetterGenerator
 from email_handler import EmailHandler
 from web_form_handler import WebFormHandler
 from discord_notifier import DiscordNotifier
+from google_drive_handler import GoogleDriveHandler
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +48,7 @@ class AIJobHunter:
         self.email_handler = EmailHandler()
         self.web_form_handler = WebFormHandler()
         self.discord_notifier = DiscordNotifier()
+        self.google_drive_handler = GoogleDriveHandler()
         
         # Statistics
         self.stats = {
@@ -199,7 +201,7 @@ CERTIFICATIONS
                 applications.append(application)
                 self.stats['applications_prepared'] += 1
                 
-                # Send Discord notification
+                # Send Discord notification with enhanced details
                 notification = NotificationData(
                     platform=job.platform.value,
                     role_title=job.title,
@@ -210,7 +212,12 @@ CERTIFICATIONS
                     timestamp=datetime.now()
                 )
                 
-                self.discord_notifier.send_notification(notification)
+                self.discord_notifier.send_notification(
+                    notification, 
+                    cover_letter=cover_letter,
+                    form_data=None,
+                    attachment_status="CV prepared for customization"
+                )
                 
             except Exception as e:
                 logger.error(f"Error processing job {job.title}: {e}")
@@ -235,13 +242,61 @@ CERTIFICATIONS
             return ApplicationType.WEB_FORM
     
     def execute_applications(self, applications: List[ApplicationPayload], cv_file_path: Optional[str] = None):
-        """Execute job applications"""
+        """Execute job applications with Google Drive integration"""
         
         logger.info(f"Executing {len(applications)} applications...")
         
         for application in applications:
             try:
                 success = False
+                attachment_status = ""
+                form_data = None
+                cv_match_score = 0
+                
+                # Calculate CV match score for notification
+                if self.cv_matcher:
+                    cv_match = self.cv_matcher.calculate_match_score(application.job_listing)
+                    cv_match_score = cv_match.match_score
+                
+                # Generate customized CV using Google Drive
+                customized_cv_path = None
+                if self.google_drive_handler.get_service_status()['drive_service_available']:
+                    try:
+                        # Find master CV
+                        master_cv_id = self.google_drive_handler.find_master_cv()
+                        if master_cv_id:
+                            # Extract keywords from job description
+                            job_keywords = self._extract_keywords_from_job(application.job_listing)
+                            
+                            # Customize CV for this job
+                            customized_doc_id = self.google_drive_handler.customize_cv_for_job(
+                                master_cv_id, 
+                                job_keywords, 
+                                application.job_listing.location or ""
+                            )
+                            
+                            if customized_doc_id:
+                                # Export to PDF
+                                customized_cv_path = self.google_drive_handler.export_to_pdf(customized_doc_id)
+                                if customized_cv_path:
+                                    attachment_status = f"Customized PDF generated: {customized_cv_path}"
+                                    logger.info(f"Customized CV created: {customized_cv_path}")
+                                else:
+                                    attachment_status = "PDF generation failed"
+                            else:
+                                attachment_status = "CV customization failed"
+                        else:
+                            attachment_status = "Master CV not found"
+                    except Exception as e:
+                        logger.error(f"Error with Google Drive CV customization: {e}")
+                        attachment_status = f"Google Drive error: {str(e)}"
+                else:
+                    attachment_status = "Google Drive not available"
+                
+                # Use original CV file if customization failed
+                if not customized_cv_path and cv_file_path:
+                    customized_cv_path = cv_file_path
+                    attachment_status = f"Using original CV: {cv_file_path}"
                 
                 if application.application_method == ApplicationType.EMAIL:
                     # Extract email from job description
@@ -252,43 +307,62 @@ CERTIFICATIONS
                     if email:
                         application.email_recipient = email
                         success = self.email_handler.send_application_email(
-                            application, cv_file_path
+                            application, customized_cv_path
                         )
                         action = "applied" if success else "failed"
+                        attachment_status += " | Email sent" if success else " | Email failed"
                 
                 elif application.application_method == ApplicationType.WEB_FORM:
-                    # Extract form fields and log them
+                    # Extract form fields and check for captcha
                     form_fields = self.web_form_handler.extract_form_fields(
                         application.job_listing.url
                     )
                     
-                    if form_fields:
+                    if form_fields is None:  # Captcha detected
+                        # Send captcha alert
+                        self.discord_notifier.send_captcha_alert(
+                            application.job_listing.url,
+                            application.job_listing.company,
+                            application.job_listing.platform.value
+                        )
+                        action = "captcha_detected"
+                        attachment_status += " | Captcha detected - manual intervention required"
+                    elif form_fields:
+                        form_data = form_fields
                         self.web_form_handler.log_form_fields(
                             application.job_listing, form_fields
                         )
                         action = "form_logged"
                         success = True
+                        attachment_status += " | Form fields extracted"
                     else:
                         action = "form_extraction_failed"
+                        attachment_status += " | Form extraction failed"
                 
                 else:
                     action = "unsupported_method"
+                    attachment_status += " | Unsupported application method"
                 
                 if success:
                     self.stats['applications_sent'] += 1
                 
-                # Send Discord notification
+                # Send enhanced Discord notification
                 notification = NotificationData(
                     platform=application.job_listing.platform.value,
                     role_title=application.job_listing.title,
                     company=application.job_listing.company,
                     application_link=application.job_listing.url,
-                    match_score=0,  # Will be calculated earlier
+                    match_score=cv_match_score,
                     action_taken=action,
                     timestamp=datetime.now()
                 )
                 
-                self.discord_notifier.send_notification(notification)
+                self.discord_notifier.send_notification(
+                    notification,
+                    cover_letter=application.cover_letter,
+                    form_data=form_data,
+                    attachment_status=attachment_status
+                )
                 
                 # Rate limiting between applications
                 time.sleep(Config.REQUEST_DELAY)
@@ -296,6 +370,13 @@ CERTIFICATIONS
             except Exception as e:
                 logger.error(f"Error executing application for {application.job_listing.title}: {e}")
                 self.stats['errors'] += 1
+                
+                # Send error notification
+                self.discord_notifier.send_error_notification(
+                    application.job_listing.platform.value,
+                    str(e),
+                    application.job_listing.url
+                )
     
     def run_hunt_cycle(self, keywords: str = "Tech Lead Software Architect", locations: Optional[List[str]] = None):
         """Run a complete job hunting cycle"""
@@ -346,6 +427,32 @@ CERTIFICATIONS
         logger.info(f"  Jobs skipped: {self.stats['jobs_skipped']}")
         logger.info(f"  Errors: {self.stats['errors']}")
     
+    def _extract_keywords_from_job(self, job: JobListing) -> List[str]:
+        """Extract relevant keywords from job description"""
+        keywords = []
+        
+        # Add job title keywords
+        title_words = job.title.split()
+        keywords.extend([word.lower() for word in title_words if len(word) > 2])
+        
+        # Add technical keywords from description
+        description_lower = job.description.lower()
+        for tech_keyword in Config.TECH_KEYWORDS:
+            if tech_keyword.lower() in description_lower:
+                keywords.append(tech_keyword)
+        
+        # Add location-specific keywords
+        if job.location:
+            location_upper = job.location.upper()
+            if 'KSA' in location_upper or 'SAUDI' in location_upper:
+                keywords.extend(['ZATCA', 'Saudi Arabia', 'E-invoicing'])
+            elif 'UAE' in location_upper:
+                keywords.extend(['UAE', 'Dubai', 'Abu Dhabi'])
+            elif 'EGYPT' in location_upper:
+                keywords.extend(['Egypt', 'Cairo', 'Alexandria'])
+        
+        return list(set(keywords))  # Remove duplicates
+    
     def cleanup(self):
         """Cleanup resources"""
         logger.info("Cleaning up resources...")
@@ -357,6 +464,10 @@ CERTIFICATIONS
         
         if self.web_form_handler:
             self.web_form_handler.close()
+        
+        # Cleanup temporary Google Drive documents
+        if self.google_drive_handler:
+            self.google_drive_handler.cleanup_temp_documents()
 
 def main():
     """Main entry point"""

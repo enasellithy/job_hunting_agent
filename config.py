@@ -23,7 +23,7 @@ class Config:
     TARGET_REGIONS = os.getenv("TARGET_REGIONS", "Egypt,KSA,UAE,EU").split(",")
     TARGET_ROLES = os.getenv("TARGET_ROLES", "Tech Lead,Software Architect,Engineering Manager").split(",")
     MIN_EXPERIENCE_YEARS = int(os.getenv("MIN_EXPERIENCE_YEARS", "9"))
-    MATCH_THRESHOLD = int(os.getenv("MATCH_THRESHOLD", "80"))
+    MATCH_THRESHOLD = int(os.getenv("MATCH_THRESHOLD", "85"))
     
     # Technical Keywords Priority
     TECH_KEYWORDS = [
@@ -45,7 +45,23 @@ class Config:
     MAX_RETRIES = 3
     TIMEOUT = 30
     
-    # File Paths
-    CV_FILE = "enas_ahmed_cv.txt"
-    LOG_FILE = "job_hunter.log"
-    DATABASE_FILE = "job_applications.db"
+    # File Paths (with Windows absolute path support)
+    if os.name == 'nt':  # Windows
+        BASE_DIR = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
+        CV_FILE = os.path.join(BASE_DIR, "enas_ahmed_cv.txt")
+        LOG_FILE = os.path.join(BASE_DIR, "job_hunter.log")
+        DATABASE_FILE = os.path.join(BASE_DIR, "job_applications.db")
+        TEMP_DIR = os.path.join(BASE_DIR, "temp")
+    else:  # Unix/Linux/Mac
+        CV_FILE = "enas_ahmed_cv.txt"
+        LOG_FILE = "job_hunter.log"
+        DATABASE_FILE = "job_applications.db"
+        TEMP_DIR = "temp"
+    
+    # Google Drive Configuration
+    GOOGLE_SERVICE_ACCOUNT_PATH = os.getenv("GOOGLE_SERVICE_ACCOUNT_PATH", "service_account.json")
+    GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    MASTER_CV_NAME = os.getenv("MASTER_CV_NAME", "Enas Ahmed - Master CV")
+    
+    # Ensure temp directory exists
+    os.makedirs(TEMP_DIR, exist_ok=True)

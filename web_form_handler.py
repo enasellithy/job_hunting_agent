@@ -10,10 +10,12 @@ import time
 import re
 from config import Config
 from models import ApplicationPayload, JobListing
+from discord_notifier import DiscordNotifier
 
 class WebFormHandler:
     def __init__(self):
         self.driver = None
+        self.discord_notifier = DiscordNotifier()
         
     def _setup_driver(self) -> webdriver.Chrome:
         """Setup undetected Chrome driver for form filling"""
@@ -29,6 +31,76 @@ class WebFormHandler:
         
         return driver
     
+    def detect_captcha(self, job_url: str) -> bool:
+        """Detect if captcha is present on the application page"""
+        
+        if not self.driver:
+            self.driver = self._setup_driver()
+        
+        try:
+            self.driver.get(job_url)
+            time.sleep(3)  # Wait for page to fully load
+            
+            page_source = self.driver.page_source.lower()
+            
+            # Common captcha indicators
+            captcha_indicators = [
+                'captcha',
+                'recaptcha',
+                'hcaptcha',
+                'cf-turnstile',
+                'g-recaptcha',
+                'hcaptcha-challenge',
+                'verify you are human',
+                'robot check',
+                'security check',
+                'i\'m not a robot',
+                'prove you are human'
+            ]
+            
+            # Check for captcha in page source
+            for indicator in captcha_indicators:
+                if indicator in page_source:
+                    return True
+            
+            # Check for common captcha elements
+            captcha_selectors = [
+                '.g-recaptcha',
+                '.hcaptcha',
+                '#cf-turnstile',
+                '[data-sitekey]',
+                'iframe[src*="recaptcha"]',
+                'iframe[src*="hcaptcha"]',
+                'iframe[src*="turnstile"]',
+                '.captcha-container',
+                '#captcha',
+                '.captcha'
+            ]
+            
+            for selector in captcha_selectors:
+                try:
+                    element = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    if element:
+                        return True
+                except NoSuchElementException:
+                    continue
+            
+            # Check for captcha in iframes
+            iframes = self.driver.find_elements(By.TAG_NAME, 'iframe')
+            for iframe in iframes:
+                try:
+                    iframe_src = iframe.get_attribute('src') or ''
+                    if any(captcha_type in iframe_src.lower() for captcha_type in ['recaptcha', 'hcaptcha', 'turnstile']):
+                        return True
+                except:
+                    continue
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error detecting captcha: {e}")
+            return False
+    
     def extract_form_fields(self, job_url: str) -> Optional[Dict[str, str]]:
         """Extract form fields from job application page"""
         
@@ -36,6 +108,11 @@ class WebFormHandler:
             self.driver = self._setup_driver()
         
         try:
+            # Check for captcha first
+            if self.detect_captcha(job_url):
+                print(f"Captcha detected on {job_url}")
+                return None
+            
             self.driver.get(job_url)
             
             # Wait for page to load
